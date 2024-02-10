@@ -1,0 +1,564 @@
+### code for manuscript
+
+## Load in the Protein data
+exp_dat <- fread()
+exp_dat <- TwoSampleMR::format_data(exp_dat, type = "exposure", 
+                                    chr_col = "CHROM", 
+                                    pos_col = "GENPOS", snp_col = "RSID", 
+                                    beta_col = "BETA",se_col = "SE", pval_col = "LOG10P", log_pval = T,
+                                    eaf_col = "A1FREQ",effect_allele_col = "A1",other_allele_col = "A0", 
+                                    phenotype_col = "Gene_name")
+
+
+### Load in cancer GWAS
+rm(outcome_dat)
+outcome_dat <- read_outcome_data(
+  filename = ,
+  sep = "\t",
+  snp_col = "SNP",
+  beta_col = "Beta",
+  se_col = "SE",
+  effect_allele_col = "A1",
+  other_allele_col = "A0",
+  pval_col = "PVALUE",
+  eaf_col =  "EAF"
+)
+
+
+### harmonise exposure and outcome data
+harm_dat <- harmonise_data(exp_dat,outcome_dat)
+
+### Run MR
+Cis_Res <- harm_dat %>%
+  mr_singlesnp(.) %>% dplyr::select(exposure, outcome, SNP, b, se, p) %>% rename(method = SNP) %>% filter(!method == "All - MR Egger") %>%
+  mutate(Assay = exposure, analysis = "Cis") 
+
+### identify number of proteins in analysis
+n_prot <- length(unique(Cis_Res$exposure))
+
+### Generate output file
+Out_Results <- data.frame()
+for (prot in unique(Cis_Res$exposure)) {
+  ## grab the cis results
+  temp_cis_single <- Cis_Res[Cis_Res$exposure== prot,] %>% filter(!is.na(b) & str_detect(method, "^rs")) %>% arrange(b) %>% 
+    mutate(is_sig = case_when(p < 0.05 ~ "Yes", T ~ "No"),
+           is_bon = case_when(p < 0.05/n_prot ~ "Yes", T ~ "No")) %>% 
+    mutate(OR = exp(b), LCI = exp(b - (1.96*se)),
+           UCI = exp(b + (1.96*se))) %>% dplyr::select(Assay, outcome, method,
+                                                       analysis, b, se,p,OR,LCI, UCI, is_sig, is_bon ) %>%
+    mutate(Strength_Evidence = case_when(between(p,0.05/n_prot, 0.05)  ~ "P < 0.05", 
+                                         p < 0.05/n_prot~ paste0("P < 0.05/",n_prot," [Bonferroni]"), 
+                                         T ~ "P > 0.05"),
+           Strength_Evidence = factor(Strength_Evidence, levels = c("P > 0.05","P < 0.05",paste0("P < 0.05/",n_prot," [Bonferroni]") )))
+  Out_Results <- rbind(Out_Results, Cis_Res)
+}
+
+## Run colocalisation analyses 
+coloc_loop(Out_Results, harm_dat,file_path_can,outcome = "Cis",opengwas_out = NA, 
+                internal_out = outcome_Dat, protein_gwas_N, cancer_gwas_n, cancer_gwas_prop_cases, start = 1, window = 75000) 
+
+  
+coloc_loop <- function(Res, harm_ref = harm_dat, file_path,outcome,opengwas_out, internal_out = internal_out,N_exp, N_out, prop_cases, start = 1, window = 500000 ) {
+  
+  ## Check if folder exists
+  ifelse(!dir.exists(file.path(file_path,outcome )), 
+         dir.create(file.path(file_path, outcome)), FALSE)
+  
+  file_path_int <-paste0(file_path,"/",outcome, "/")
+  
+  Summary <- data.frame()
+  for (i in start:length(Res$method)) {
+    ## load in the file
+    ## load in the file
+    temp_prot <- TwoSampleMR::read_exposure_data(paste0( 
+      file_list[grepl(Res$query_snp[i], file_list) &
+                  grepl(str_replace_all(paste0(Res$gene.exposure[i], "_"),"-", "-"), file_list)]),
+      sep = ",",
+      snp_col = "RSID",beta_col = "BETA", 
+      se_col = "SE", log_pval =T,pval_col =   "LOG10P", 
+      effect_allele_col = "ALLELE1", 
+      other_allele_col = "ALLELE0", 
+      pos_col = "GENPOS", chr_col = "CHROM", eaf_col = "A1FREQ", min_pval = NA) %>%
+      filter(str_detect(SNP, "^rs"))
+    
+    
+    temp_prot$exposure <- Res$Assay[i]
+    lead_snp_pos <-unique(harm_ref$pos.exposure[harm_ref$SNP == Res$method[i]])
+
+    ## Run the analysis
+    temp_res <-Master_Coloc(exp_dat = temp_prot,exposure_id = NA, outcome_dat = internal_out,
+                            outcome_id = opengwas_out, lead_SNP = Res$method[i], 
+                            N_exp = N_exp, N_out = N_out, prop_cases = prop_cases)
+    
+    ## Check if folder exists
+    ifelse(!dir.exists(file.path(file_path_int, paste0(gsub(pattern = "/", replacement = "_",Res$exposure[i]),"_",
+                                                       Res$method[i]))), 
+           dir.create(file.path(file_path_int, paste0(gsub(pattern = "/", replacement = "_",Res$exposure[i]),"_",
+                                                      Res$method[i]))), FALSE)
+    
+    
+    ## Save 
+    ## Harmonised Dataframe
+    write.csv(temp_res[[1]],paste0(file.path(file_path_int, paste0(gsub(pattern = "/", replacement = "_",Res$exposure[i]),"_",
+                                                                   Res$method[i])),"/Harmonised_Data.csv"), row.names = F)
+    ## Summary Table
+    write.csv(temp_res[[2]],paste0(file.path(file_path_int, paste0(gsub(pattern = "/", replacement = "_",Res$exposure[i]),"_",
+                                                                   Res$method[i])),"/Summary_Table.csv"),  row.names = F)
+    ## Full Coloc Results
+    write.csv(temp_res[[3]],paste0(file.path(file_path_int, paste0(gsub(pattern = "/", replacement = "_",Res$exposure[i]),"_",
+                                                                   Res$method[i])),"/Full_Coloc_Res.csv"), row.names = F)
+    ## ZZ Plot
+    ggsave(filename = paste0(file.path(file_path_int, paste0(gsub(pattern = "/", replacement = "_",Res$exposure[i]),"_",
+                                                             Res$method[i])),"/Z_Z_Plot.pdf"),plot = temp_res[[4]],
+           width = 60, height = 30, units = "cm",device = "pdf")
+    ggsave(filename = paste0(file.path(file_path_int, paste0(gsub(pattern = "/", replacement = "_",Res$exposure[i]),"_",
+                                                             Res$method[i])),"/Locus_Plot.pdf"),plot = temp_res[[5]],
+           width = 60, height = 30, units = "cm",device = "pdf")
+    
+    temp_summary <- temp_res[[2]]
+    temp_summary$SNP <- Res$method[i]
+    temp_summary$exposure_id <- paste0(Res$exposure[i],"_",
+                                       Res$method[i])
+    
+    Summary <- rbind(Summary, temp_summary)
+  }
+  
+  dir_list_top <- list.dirs(file_path_int,recursive = F, full.names = TRUE)
+  
+  temp_sum_can <- data.frame()
+  
+  for (i in 1:length(dir_list_top)) {
+    
+    temp_sum <- fread(paste0(file_path_int,"/",str_split_fixed(dir_list_top, pattern = "/", 11)[i,11], "/Summary_Table.csv" ))
+    
+    temp_sum$SNP <- str_split_fixed(str_split_fixed(dir_list_top, pattern = "/", 11)[i,11], pattern = "_", n = 2)[2]
+    
+    temp_sum$exposure_id <- str_split_fixed(dir_list_top, pattern = "/", 11)[i,11]
+    temp_sum$exposure_id <- str_replace(temp_sum$exposure_id, pattern = "/", replacement = "")
+    
+    temp_sum_can <- rbind(temp_sum_can, temp_sum)
+  }
+  
+  fwrite(temp_sum_can,paste0(file_path_int, "/Summary_Table.csv" ), row.names = F)
+  
+}
+
+
+#### Functions for code
+
+Make_ZZ_Plot <- function(LD_Mat, lead_SNP, Harm_dat, 
+                         exposure_name =  base::unique(Harm_dat[,"exposure"]),
+                         outcome_name = base::unique(Harm_dat[,"outcome"])) {
+
+  # if(!lead_SNP %in% colnames(LD_Mat)){
+  #   print("Lead SNP not in LD Matrix")
+  #   lead_SNP <- Harm_dat %>% filter(SNP %in% colnames(LD_Mat)) %>%
+  #     arrange(desc(.)) %>% dplyr::slice(1) %>% select(SNP)
+  #   }
+  
+  ## We want to extract the column that is the lead SNP for plotting
+  LD_TEMP <- LD_Mat[,c("RS_number", lead_SNP)]
+  
+  ## We want to merge through the LD vector for plottign
+  temp_dat_Format <- merge(Harm_dat, LD_TEMP, by.x ="SNP" , by.y = "RS_number", all.x = T)
+  
+  ## Annoyingly long ifelse to create color factor variable
+  temp_dat_Format[,lead_SNP] <- ifelse(is.na(temp_dat_Format[,lead_SNP]), 0, temp_dat_Format[,lead_SNP])
+  temp_dat_Format$LD <- ifelse(temp_dat_Format[,lead_SNP]  > 0 &temp_dat_Format[,lead_SNP]  <=.2, "LD < 0.2",
+                               ifelse(temp_dat_Format[,lead_SNP]  > 0.2 & temp_dat_Format[,lead_SNP]  <=.4, "0.2 > LD < 0.4",
+                                      ifelse(temp_dat_Format[,lead_SNP]  > 0.4 & temp_dat_Format[,lead_SNP] <=.6, "0.4 > LD < 0.6",
+                                             ifelse(temp_dat_Format[,lead_SNP]  > 0.6 & temp_dat_Format[,lead_SNP]  <=.8, "0.6 > LD < 0.8",
+                                                    ifelse(temp_dat_Format[,lead_SNP]  > 0.8, "LD > 0.8", "No LD")))))
+  temp_dat_Format$LD <- ifelse(is.na(temp_dat_Format$LD), "No LD", temp_dat_Format$LD)
+  temp_dat_Format$LD <- ifelse(temp_dat_Format$SNP == lead_SNP, "Lead SNP", temp_dat_Format$LD)
+  
+  ## Create Z scores for plotting
+  temp_dat_Format$Z_exp <- temp_dat_Format$beta.exposure/temp_dat_Format$se.exposure
+  temp_dat_Format$Z_out <- temp_dat_Format$beta.outcome/temp_dat_Format$se.outcome
+  
+  
+  pos <- position_jitter(width = 0.5, seed = 1)
+  # Reorder following the value of another column:
+  Plot <- temp_dat_Format %>% mutate(LD = fct_reorder(LD, get(lead_SNP))) %>%
+    ggplot(aes(Z_exp, Z_out, color = LD)) + geom_point(size = 2) + 
+    theme_bw() + xlab(paste(exposure_name," Z-score", sep = "")) +
+    ylab(paste(outcome_name," Z-score", sep = "")) + 
+    ggtitle(paste("Z-Z Locus Plot for: ", exposure_name, " and ", outcome_name, sep = "")) +
+    theme(axis.text = element_text(hjust = 1,  size =20),
+          plot.title = element_text(hjust = 0.5,size=22,face="bold"),
+          axis.title=element_text(size=25,face="bold"),
+          legend.text = element_text(size = 15),
+          legend.title = element_text(size = 20, face = "bold")) + 
+    geom_label_repel(size = 6,
+                     data=temp_dat_Format %>% filter(SNP==lead_SNP), # Filter data first
+                     aes(label=SNP),show.legend = FALSE
+    )+ 
+    labs(color= 'LD with Lead SNP') +  
+    scale_color_manual(values=c("No LD" = "#D3D3D3",
+                                "LD < 0.2"="#225EA8",
+                                "0.2 > LD < 0.4"="#41B6C4",
+                                "0.4 > LD < 0.6"="#7FCDBB",
+                                "0.6 > LD < 0.8"= "#FE9929",
+                                "LD > 0.8"="#8856A7",
+                                "Lead SNP" = "#F768A1"
+    ))
+  return(Plot)
+}
+
+
+Make_Locus_Compare <- function(Harm_dat,lead_SNP, 
+                               exposure_name =  unique(Harm_dat[,"exposure"]),
+                               outcome_name = unique(Harm_dat[,"outcome"])){
+  ## Make  LOCUS ZOOM plot 
+  ## we want to recalculate the p values
+  Harm_dat$pval.exposure <- pnorm(abs(Harm_dat$beta.exposure)/Harm_dat$se.exposure, lower.tail = FALSE) * 2
+  Harm_dat$pval.outcome <- pnorm(abs(Harm_dat$beta.outcome)/Harm_dat$se.outcome, lower.tail = FALSE) * 2
+  exp_gwas_lc <- Harm_dat[,c("SNP", "pval.exposure")]
+  colnames(exp_gwas_lc) <- c("rsid", "pval")
+  
+  out_gwas_lc <- Harm_dat[,c("SNP", "pval.outcome")]
+  colnames(out_gwas_lc) <- c("rsid", "pval")
+  
+  locus_plot <- tryCatch(expr =  
+             {locuscompare(in_fn1 = exp_gwas_lc, in_fn2 = out_gwas_lc, title = exposure_name, 
+                           title2 = outcome_name)},
+           error = function(e) {
+             message("Locus Plot Didnt Work...")
+             ggplot(Harm_dat, aes(beta.exposure, beta.outcome)) + geom_point()+
+               ggtitle("Replacement for Locus Plot where SNPs 'not on same chromosome'")
+           })
+
+  return(locus_plot)
+  
+}
+Master_Coloc <- function(exp_dat= NA, exposure_id = NA, 
+                         outcome_dat = NA, outcome_id = NA, 
+                         lead_SNP, window = 75000, token ="4134a0a348dc", 
+                         N_exp, N_out, prop_cases){
+  
+  if(is.na(exposure_id)){
+    print("Internal exposure dataset")
+  } else if(!is.na(exposure_id)){ 
+    print("Fetchting external exposure dataset")
+    exp_dat <- get_openGWAS_protein(lead_SNP, exposure_id, window = window)
+  } else {
+    stop("Neither External Exposure Data nor OpenGWAS ID provided")
+  }
+  ## keep only variants we can query in LDLinkR
+  exp_dat <- exp_dat %>% filter(str_detect(SNP,"^rs"))
+  
+  if(dim(exp_dat[is.na(exp_dat$eaf.exposure),])[1] > 0) {
+    print("Fetching EAF...")
+    exp_dat <- EAF_SNP(exp_dat)
+  }
+  dim_exp_pre <- dim(exp_dat)[1]
+  exp_dat <- exp_dat %>% filter(!is.na(eaf.exposure))
+  dim_exp_post <- dim(exp_dat)[1]
+  print(paste0(abs(dim_exp_post-dim_exp_pre), " SNPs Excluded because no EAF"))
+  
+  LD_and_Exp_Dat <- Coloc_LD_Exp_Format(exp_dat)
+
+  if(is.na(outcome_id)){
+    print("Internal Outcome dataset")
+    Harm_dat <- harmonise_data(LD_and_Exp_Dat$exp_dat, outcome_dat)
+  } else if(!is.na(outcome_id)){ 
+    print("Fetchting external outcome dataset")
+    outcome_Open_GWAS <- extract_outcome_data(LD_and_Exp_Dat$exp_dat$SNP,outcome_id )
+    Harm_dat <- harmonise_data(exp_dat, outcome_Open_GWAS)
+  } else {
+    stop("Neither External Outcome Data nor OpenGWAS ID provided")
+  }
+  
+  if(sum(is.na(Harm_dat$other_allele.exposure))) {
+
+    Harm_dat$other_allele.exposure <- Harm_dat$other_allele.outcome
+  }
+  if(sum(is.na(Harm_dat$other_allele.outcome))) {
+    Harm_dat$other_allele.outcome <- Harm_dat$other_allele.exposure
+  }
+
+  
+  if(dim(Harm_dat[is.na(Harm_dat$eaf.outcome),])[1] < 
+     dim(Harm_dat[is.na(Harm_dat$eaf.exposure),])[1]) {
+    Harm_dat$eaf.exposure <- Harm_dat$eaf.outcome
+  } else {
+    Harm_dat$eaf.outcome<- Harm_dat$eaf.exposure
+  }
+  
+  Harm_dat <- Harm_dat[!is.na(Harm_dat$eaf.outcome),]
+  
+  if(!lead_SNP %in% Harm_dat$SNP){
+    print("Lead SNP not in Outcome Data. Finding Proxy for Plots")
+    
+    out_dat_Proxy <- tryCatch(expr =  
+                             {find_proxies(snp = lead_SNP,LD = LD_and_Exp_Dat$LD[[2]])},
+                             error = function(e) {
+                               message("we couldnt find the lead SNP in the LD Mat")
+                               data.frame()
+                             })
+    if(dim(out_dat_Proxy)[1] < 1){
+      print("Lead SNP doesnt have good proxy for plot. Taking label for min(p exposure)")
+      out_snp <- Harm_dat %>% filter(SNP %in% colnames(LD_and_Exp_Dat$LD[[2]])) %>%
+        mutate(temp_z = beta.exposure/se.exposure) %>%
+        arrange(desc(abs(temp_z))) %>% dplyr::slice(1) %>% dplyr::select(SNP)
+    } else {
+      out_snp <- out_dat_Proxy$Proxy
+    }
+    
+    print(paste("Lead SNP replacement is: ",  out_snp, sep = ""))
+    lead_SNP <- out_snp
+  }
+  
+  lead_SNP <- as.character(lead_SNP)
+  results_to_return <- Do_Coloc_Plots(Harm_dat, 
+                                      LD_and_Exp_Dat$LD, N_exp, 
+                                      N_out, prop_cases, lead_SNP)
+  
+  names(results_to_return) <-paste(names(results_to_return),"_", lead_SNP, sep= "")
+  return(results_to_return)
+}
+
+Coloc_LD_Exp_Format <- function(exp_dat){
+  LD_Return <- get_ld_matrix(exp_dat$SNP,plink_loc = plink_loc, bfile_loc = bfile_loc)
+  ## restrict only to SNPs with LD values
+  exp_dat <- exp_dat[exp_dat$SNP %in% colnames(LD_Return[[1]]), ]
+  exp_dat <- exp_dat <- exp_dat[order(colnames(LD_Return[[1]])),]
+  return(list(LD=LD_Return, exp_dat = exp_dat))
+}
+
+get_ld_matrix <- function(rsid_list, plink_loc, bfile_loc, with_alleles = F){
+  setwd()
+  unixtools::set.tempdir()
+
+  
+  LD_Full <- ieugwasr::ld_matrix_local(rsid_list, bfile = bfile_loc, 
+                                       plink_bin= plink_loc , with_alleles = F)
+  
+  temp_dir <- tempdir()
+  files <- list.files(temp_dir)
+  
+  if (length(files) > 0) {
+    unlink(file.path(temp_dir, files), recursive = TRUE)
+  }
+  ## format the LD matrix
+  LD <- LD_Full[,!colnames(LD_Full) %in% names(which(colSums(is.na(as.matrix(LD_Full))) > dim(LD_Full)-1)) ]
+  LD <- LD[complete.cases(LD),]
+  rownames(LD) <- colnames(LD)
+  LD_Full <- as.data.frame(LD_Full)
+  LD_Full$RS_number <- rownames(LD)
+  return(list(LD_Anal = LD, LD_Plot = LD_Full))
+  
+}
+
+Do_Coloc_Plots <- function(Harm_dat, LD, N_exp, 
+                           N_out, prop_cases, 
+                           lead_SNP){
+  ## Do the coloc
+  coloc_res <- get_coloc_all(Harm_dat ,LD[[1]], N_exp, N_out, prop_cases)
+  ## get the zz plot
+  ZZ_Plot <- Make_ZZ_Plot(LD[[2]], lead_SNP, Harm_dat = Harm_dat)
+  ## get the locus plot
+  locus_Plot <- Make_Locus_Compare(Harm_dat, lead_SNP)
+  
+  return(list(Harmonised_Dataframe = Harm_dat, Coloc_Results_Summary = coloc_res[[1]],
+              Coloc_Results =  coloc_res[[2]], Z_Z_Plot=ZZ_Plot, LocusComparePlot = locus_Plot))
+  #return(list(Harmonised_Dataframe = Harm_dat, Coloc_Results_Summary = coloc_res[[1]],
+  #       Coloc_Results =  coloc_res[[2]]))
+}
+
+get_coloc_all <- function(Harm_dat, LD, N_exp, N_out, prop_cases){
+  ### check that the N and prop and eaf are present
+  
+  ## Make sure there are no duplicates
+  Harm_dat <- Harm_dat[!duplicated(Harm_dat$SNP),]
+  
+  Harm_dat <- Harm_dat %>% filter(SNP %in% colnames(LD))
+  
+  ## do some formatting
+  LD <- data.frame(columnNameILike = row.names(LD), LD)
+  LD <- LD[,-1]
+  ## keep only the SNPs in the LD matrix 
+  LD <- LD %>% dplyr::select(Harm_dat$SNP) %>% filter(row.names(.) %in% colnames(.))
+  LD <- LD[order(row.names(LD)),] %>% dplyr::select(row.names(.))
+  ## format the input dataframes
+  ### Exposure
+  D1=list(beta=Harm_dat$beta.exposure,
+          varbeta=Harm_dat$se.exposure^2,
+          snp=Harm_dat$SNP, 
+          MAF=Harm_dat$eaf.outcome, 
+          LD = as.matrix(LD),
+          position = Harm_dat$pos.exposure,
+          N=N_exp, 
+          sdY=1,
+          type="quant")
+  
+  ### Outcome
+  D2=list(beta=Harm_dat$beta.outcome,
+          varbeta=Harm_dat$se.outcome^2,
+          snp=Harm_dat$SNP, 
+          MAF=Harm_dat$eaf.outcome, 
+          LD = as.matrix(LD),
+          position = Harm_dat$pos.exposure,
+          s=prop_cases, # This is the case proportion. Make sure to specify if using a case-control GWAS (get this information from the paper
+          N=N_out, #number of participants
+          type="cc")
+  
+  ### Run the conditional iterative method
+  colo_res_Cond_Iter <- coloc::coloc.signals(
+    D1,
+    D2,
+    MAF = NULL,
+    LD = NULL,
+    method = c("cond"),
+    mode = c("iterative"),
+    p1 = 0.00042,
+    p2 = 0.00004,
+    p12 = 0.000001,
+    maxhits = 3,
+    r2thr = 0.01,
+    pthr = 1e-06
+  )
+  colo_res_Cond_Iter$summary$method <- "Cond_Iter"
+  
+  ### Run the single method
+  colo_res_simple <- coloc::coloc.signals(
+    D1,
+    D2,
+    MAF = NULL,
+    LD = NULL,
+    method = c("single"),
+    p1 = 0.00042,
+    p2 = 0.00004,
+    p12 = 0.000001,
+    maxhits = 3,
+    r2thr = 0.01,
+    pthr = 1e-06
+  )
+  colo_res_simple$summary$method <- "Single"
+  
+  ## rbind the two methods
+  comb_coloc <- rbind(colo_res_simple$summary,colo_res_Cond_Iter$summary )
+  
+  ## re-order columns 
+  comb_coloc <- comb_coloc[,c("nsnps", "hit1", "hit2",
+                              "PP.H0.abf","PP.H1.abf",
+                              "PP.H2.abf","PP.H3.abf",
+                              "PP.H4.abf", "method")]
+  
+  comb_coloc <- comb_coloc %>%
+    mutate(PP.H4.abf = ifelse(PP.H4.abf == 0, runif(n(), 
+                                                    min = .Machine$double.eps, 
+                                                    max = .Machine$double.eps * 1e3), 
+                              PP.H4.abf))
+  
+  ## Give the columns meaningful names for the exposure and the outcome
+  comb_coloc$Exposure <- unique(Harm_dat$exposure)
+  comb_coloc$Outcome <- unique(Harm_dat$outcome)
+  
+  ## create a nice summary dataframe 
+  if(max(comb_coloc$PP.H4.abf[comb_coloc$method == "Cond_Iter"]) != 0) {
+  summary_return <- comb_coloc %>% group_by(Outcome, Exposure, method) %>% filter(PP.H4.abf == max(PP.H4.abf)) %>% 
+    dplyr::select(PP.H4.abf, method, Exposure, Outcome) %>% 
+    pivot_wider(names_from = method, values_from = PP.H4.abf)
+  } else {
+    summary_return <- data.frame(Exposure = unique(comb_coloc$Exposure), 
+                                 Outcome = unique(comb_coloc$Outcome), 
+                                 Single = max(comb_coloc$PP.H4.abf[comb_coloc$method == "Single"]),
+                                 Cond_Iter = max(comb_coloc$PP.H4.abf[comb_coloc$method == "Cond_Iter"]))
+  }
+  
+  
+  return(list(Summary = summary_return, Results = comb_coloc))
+  
+}
+
+###### colocalisation phewas code
+
+### Load in cancer GWAS
+rm(outcome_dat)
+outcome_dat <- read_outcome_data(
+  filename = ,
+  sep = "\t",
+  snp_col = "SNP",
+  beta_col = "Beta",
+  se_col = "SE",
+  effect_allele_col = "A1",
+  other_allele_col = "A0",
+  pval_col = "PVALUE",
+  eaf_col =  "EAF"
+)
+
+
+### Load in protein GWAS data
+temp_prot <- TwoSampleMR::read_exposure_data(sum_stat_file_path,
+                                             sep = ",",
+                                             snp_col = "RSID",beta_col = "BETA", 
+                                             se_col = "SE", pval_col = "PVAL", 
+                                             effect_allele_col = "EFFECT_ALLELE", 
+                                             other_allele_col = "REFERENCE_ALLELE", 
+                                             pos_col = "POS", chr_col = "CHR", eaf_col = "FREQ1")
+
+## extract reference ids from opengwas for traits of interest
+traits_network <- ieugwasr::phewas(lead_SNP , pval = 5e-5) %>% 
+  filter(!str_detect(id, pattern = "eqtl"), !str_detect(id, pattern = "bbj")) 
+
+Network <- data.frame()
+for (i in 1:dim(traits_network)[1]) {
+  
+
+temp_res <- Master_Coloc(temp_prot, exposure_id = NA, 
+                outcome_dat = NA, outcome_id = traits_network$id[i],
+                lead_SNP,window = 75000,N_exp, traits_network$n[i], prop_cases, 
+                outcome_binary = 0 )
+
+Network <- rbind(temp_res[[1]], Network)
+}
+
+Network_coloc<- U_PAR_Network %>% mutate(max_coloc=pmax(Single,Cond_Iter)) %>%
+  filter(max_coloc > 0.7) %>% select(id.outcome) 
+middle_traits <-  Network_coloc$id.outcome
+
+hyprcoloc_res <- multi_lvl_coloc(temp_prot, outcome_dat, middle_traits)
+
+multi_lvl_coloc <- function(exp_dat, outcome_dat, middle_traits) {
+
+   ## grab out the middle trait we want
+  dh <- subset(d, select = c(SNP,  exposure, id.exposure, effect_allele.exposure, other_allele.exposure, 
+                             eaf.exposure, beta.exposure, se.exposure, pval.exposure))
+  for (trait in middle_traits) {
+    exposure_2 <- extract_outcome_data(exp_dat[,"SNP"], 
+                                       trait)
+    ## harminose these two
+    d <- harmonise_data(exp_dat, exposure_2)
+    ## exposure 2
+    dh2 <- subset(d, select = c(SNP, outcome, id.outcome, effect_allele.outcome, 
+                                other_allele.outcome, eaf.outcome, beta.outcome, se.outcome, 
+                                pval.outcome))
+    ## fix the naming
+    names(dh2) <- gsub("outcome", "exposure", names(dh2))
+    ## make dataframe inu format we need later
+    dh <- rbind(dh, dh2)
+  }
+  
+
+  ## harmonise data with outcome
+  dat <- mv_harmonise_data(dh, outcome_dat)
+  ## format betas and se for hyprcoloc
+  betas <- cbind(dat$exposure_beta, dat$outcome_beta)
+  ses <- cbind(dat$exposure_se, dat$outcome_se)
+  
+  
+  # Trait names and SNP IDs
+  traits <- c(dat$expname[,2], dat$outname[,2])
+  rsid <- rownames(betas)
+  
+  # Colocalization analysis
+  results_hypr <-hyprcoloc(betas, ses, trait.names=traits, snp.id=rsid)
+  ## return results
+  return(results_hypr$results)
+}
+
+
+
+
+
